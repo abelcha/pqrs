@@ -1,13 +1,17 @@
 use crate::errors::PQRSError;
 use crate::errors::PQRSError::CouldNotOpenFile;
+use arrow::csv as csvwriter;
+use arrow::json::{writer as jsonwriter, LineDelimitedWriter};
 use arrow::{datatypes::Schema, record_batch::RecordBatch};
+use arrow_schema::ArrowError;
 use log::debug;
-use parquet::arrow::{arrow_reader::ArrowReaderBuilder};
+use parquet::arrow::arrow_reader::{
+    ArrowReaderBuilder, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
+};
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::Row;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
-use std::cmp::min;
 use std::fs::File;
 use std::ops::Add;
 use std::path::Path;
@@ -27,6 +31,7 @@ pub enum Formats {
     Csv,
     CsvNoHeader,
     Json,
+    NdJson,
 }
 
 impl std::fmt::Display for Formats {
@@ -53,7 +58,7 @@ pub fn open_file<P: AsRef<Path>>(file_name: P) -> Result<File, PQRSError> {
 }
 
 /// Check if the given entry in the walking tree is a hidden file
-pub fn is_hidden(entry: &DirEntry) -> bool {
+pub fn _is_hidden(entry: &DirEntry) -> bool {
     entry
         .file_name()
         .to_str()
@@ -61,113 +66,72 @@ pub fn is_hidden(entry: &DirEntry) -> bool {
         .unwrap_or(false)
 }
 
-/// Print the given number of records in either json or json-like format
+/// ```
+#[derive(Debug, Default)]
+pub struct JsonValid {}
+
+impl jsonwriter::JsonFormat for JsonValid {
+    fn start_stream<W: std::io::Write>(&self, writer: &mut W) -> Result<(), ArrowError> {
+        writer.write_all(b"[\n")?;
+        Ok(())
+    }
+
+    fn start_row<W: std::io::Write>(
+        &self,
+        writer: &mut W,
+        is_first_row: bool,
+    ) -> Result<(), ArrowError> {
+        if !is_first_row {
+            writer.write_all(b",\n")?;
+        }
+        Ok(())
+    }
+
+    fn end_stream<W: std::io::Write>(&self, _writer: &mut W) -> Result<(), ArrowError> {
+        _writer.write_all(b"\n]")?;
+        Ok(())
+    }
+}
+
+pub type ValidWriter<W> = jsonwriter::Writer<W, JsonValid>;
+
 pub fn print_rows(
     file: File,
-    num_records: Option<usize>,
+    num_records: Option<i64>,
     format: Formats,
 ) -> Result<(), PQRSError> {
-    let mut left = num_records;
+    let out = std::io::stdout();
+    let value = num_records.unwrap_or(0);
+    let options = ArrowReaderOptions::new().with_page_index(value != 0);
+    let builder = ParquetRecordBatchReaderBuilder::try_new_with_options(file, options)?;
+    let reader;
+    if value > 0 {
+        reader = builder.with_limit(value as usize);
+    } else if value < 0 {
+        let total_rows = builder.metadata().file_metadata().num_rows();
+        reader = builder.with_offset((total_rows + value) as usize);
+    } else {
+        reader = builder.with_batch_size(1024 * 8)
+    }
+
+    let mut stream = reader.build()?.into_iter().map(|x| x.unwrap());
 
     match format {
-        Formats::Default => {
-            let parquet_reader = SerializedFileReader::new(file)?;
-            let mut iter = parquet_reader.get_row_iter(None)?;
-
-            let mut start: usize = 0;
-            let end: usize = num_records.unwrap_or(0);
-            // if num_records is None, print all the files
-            let all_records = num_records.is_none();
-
-            while all_records || start < end {
-                match iter.next() {
-                    Some(row) => {
-                        match row {
-                            Ok(rowval) => print_row(&rowval, format),
-                            Err(_) => todo!(),
-                        }
-                    },
-                    None => break,
-                }
-                start += 1;
-            }
+        Formats::Csv | Formats::CsvNoHeader => {
+            let mut wtx = csvwriter::WriterBuilder::new().build(out);
+            stream.try_for_each(|batch| wtx.write(&batch))?;
+        }
+        Formats::Default | Formats::NdJson => {
+            let mut wtx = LineDelimitedWriter::new(out);
+            stream.try_for_each(|batch| wtx.write(&batch))?;
         }
         Formats::Json => {
-            let arrow_reader = ArrowReaderBuilder::try_new(file)?;
-            let batch_reader = arrow_reader.with_batch_size(8192).build()?;
-            let mut writer = arrow::json::LineDelimitedWriter::new(std::io::stdout());
-
-            for maybe_batch in batch_reader {
-                if left == Some(0) {
-                    break;
-                }
-
-                let mut batch = maybe_batch?;
-                if let Some(l) = left {
-                    if batch.num_rows() <= l {
-                        left = Some(l - batch.num_rows());
-                    } else {
-                        let n = min(batch.num_rows(), l);
-                        batch = batch.slice(0, n);
-                        left = Some(0);
-                    }
-                };
-
-                writer.write(&batch)?;
-            }
-
-            writer.finish()?;
+            let mut wtx = ValidWriter::new(out);
+            stream
+                .try_for_each(|batch| wtx.write(&batch))
+                .and_then(|_| wtx.finish())?;
         }
-        Formats::Csv => {
-            let arrow_reader = ArrowReaderBuilder::try_new(file)?;
-            let batch_reader = arrow_reader.with_batch_size(8192).build()?;
-            let mut writer = arrow::csv::Writer::new(std::io::stdout());
-
-            for maybe_batch in batch_reader {
-                if left == Some(0) {
-                    break;
-                }
-
-                let mut batch = maybe_batch?;
-                if let Some(l) = left {
-                    if batch.num_rows() <= l {
-                        left = Some(l - batch.num_rows());
-                    } else {
-                        let n = min(batch.num_rows(), l);
-                        batch = batch.slice(0, n);
-                        left = Some(0);
-                    }
-                };
-
-                writer.write(&batch)?;
-            }
-        }
-        Formats::CsvNoHeader => {
-            let arrow_reader = ArrowReaderBuilder::try_new(file)?;
-            let batch_reader = arrow_reader.with_batch_size(8192).build()?;
-            let writer_builder = arrow::csv::WriterBuilder::new();
-            let mut writer = writer_builder.with_header(false).build(std::io::stdout());
-
-            for maybe_batch in batch_reader {
-                if left == Some(0) {
-                    break;
-                }
-
-                let mut batch = maybe_batch?;
-                if let Some(l) = left {
-                    if batch.num_rows() <= l {
-                        left = Some(l - batch.num_rows());
-                    } else {
-                        let n = min(batch.num_rows(), l);
-                        batch = batch.slice(0, n);
-                        left = Some(0);
-                    }
-                };
-
-                writer.write(&batch)?;
-            }
-        }
-    }
+    };
     Ok(())
 }
 
@@ -200,7 +164,7 @@ pub fn print_rows_random(
         if indexes.contains(&start) {
             match row {
                 Ok(rowval) => print_row(&rowval, format),
-                Err(_) => todo!()
+                Err(_) => todo!(),
             }
         }
     }
@@ -265,6 +229,7 @@ pub fn get_row_batches(file: File) -> Result<ParquetData, PQRSError> {
 /// Print the given parquet rows in json or json-like format
 fn print_row(row: &Row, format: Formats) {
     match format {
+        Formats::NdJson => todo!(),
         Formats::Default => println!("{}", row),
         Formats::Csv => println!("Unsupported! {}", row),
         Formats::CsvNoHeader => println!("Unsupported! {}", row),
