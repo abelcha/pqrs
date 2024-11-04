@@ -10,6 +10,7 @@ mod utils;
 enum Commands {
     Cat(commands::cat::CatCommandArgs),
     Head(commands::head::HeadCommandArgs),
+    Tail(commands::tail::TailCommandArgs),
     Merge(commands::merge::MergeCommandArgs),
     #[command(alias = "rowcount")]
     RowCount(commands::rowcount::RowCountCommandArgs),
@@ -42,6 +43,7 @@ fn main() -> Result<(), PQRSError> {
     match args.command {
         Commands::Cat(opts) => commands::cat::execute(opts)?,
         Commands::Head(opts) => commands::head::execute(opts)?,
+        Commands::Tail(opts) => commands::tail::execute(opts)?,
         Commands::Merge(opts) => commands::merge::execute(opts)?,
         Commands::RowCount(opts) => commands::rowcount::execute(opts)?,
         Commands::Sample(opts) => commands::sample::execute(opts)?,

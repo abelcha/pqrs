@@ -5,9 +5,9 @@ use clap::Parser;
 use log::debug;
 use std::path::PathBuf;
 
-/// Prints the first n records of the Parquet file
+/// Prints the last n records of the Parquet file
 #[derive(Parser, Debug)]
-pub struct HeadCommandArgs {
+pub struct TailCommandArgs {
     /// Use CSV format for printing
     #[arg(short, long, conflicts_with = "json")]
     csv: bool,
@@ -24,7 +24,7 @@ pub struct HeadCommandArgs {
     file: PathBuf,
 }
 
-pub(crate) fn execute(opts: HeadCommandArgs) -> Result<(), PQRSError> {
+pub(crate) fn execute(opts: TailCommandArgs) -> Result<(), PQRSError> {
     let format = if opts.json {
         Formats::Json
     } else if opts.csv {
@@ -42,7 +42,7 @@ pub(crate) fn execute(opts: HeadCommandArgs) -> Result<(), PQRSError> {
     }
 
     let file = open_file(&opts.file)?;
-    print_rows(file, Some(opts.records), format)?;
+    print_rows(file, Some(-opts.records), format)?;
 
     Ok(())
 }

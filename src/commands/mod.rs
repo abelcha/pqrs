@@ -1,5 +1,6 @@
 pub(crate) mod cat;
 pub(crate) mod head;
+pub(crate) mod tail;
 pub(crate) mod merge;
 pub(crate) mod rowcount;
 pub(crate) mod sample;
